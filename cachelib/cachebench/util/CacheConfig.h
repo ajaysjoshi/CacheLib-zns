@@ -110,6 +110,7 @@ struct CacheConfig : public JSONConfig {
 
   // Navy specific: block size in bytes
   uint64_t navyBlockSize{512};
+  bool navyZonedDevice{false};
 
   // Navy specific: region size in MB
   uint64_t navyRegionSizeMB{16};

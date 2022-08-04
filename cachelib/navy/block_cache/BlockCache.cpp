@@ -50,7 +50,8 @@ BlockCache::Config& BlockCache::Config::validate() {
   if (regionSize > 256u << 20) {
     // We allocate region in memory to reclaim. Too large region will cause
     // problems: at least, long allocation times.
-    throw std::invalid_argument("region is too large");
+    if(!device->getIOZoneSize())
+      XLOG(WARN) << "region is too large";
   }
   if (cacheSize <= 0) {
     throw std::invalid_argument("invalid size");

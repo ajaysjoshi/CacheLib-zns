@@ -77,11 +77,17 @@ class Device {
   Device(uint64_t size,
          std::shared_ptr<DeviceEncryptor> encryptor,
          uint32_t ioAlignSize,
-         uint32_t maxWriteSize)
+         uint32_t maxWriteSize,
+         uint32_t ioNoOfZones=0,
+         uint64_t ioZoneSize=0,
+         uint64_t ioZoneCapSize=0)
       : size_(size),
         ioAlignmentSize_{ioAlignSize},
         maxWriteSize_(maxWriteSize),
-        encryptor_{std::move(encryptor)} {
+        encryptor_{std::move(encryptor)},
+        ioZoneSize_{std::move(ioZoneSize)},
+        ioZoneCapSize_{std::move(ioZoneCapSize)},
+        ioNoOfZones_{std::move(ioNoOfZones)}{
     if (ioAlignSize == 0) {
       throw std::invalid_argument(
           folly::sformat("Invalid ioAlignSize {}", ioAlignSize, size));
@@ -147,8 +153,15 @@ class Device {
 
   // Returns the alignment size for device io operations
   uint32_t getIOAlignmentSize() const { return ioAlignmentSize_; }
+  bool reset(uint64_t offset, uint32_t size) { return resetImpl(offset, size); }
+  bool finish(uint64_t offset, uint32_t size) { return finishImpl(offset, size); }
+  uint64_t getIOZoneSize() const { return ioZoneSize_; }
+  uint64_t getIOZoneCapSize() const { return ioZoneCapSize_; }
+  uint64_t getIONrOfZones() const { return ioNoOfZones_; }
 
  protected:
+  virtual bool resetImpl(uint64_t offset, uint32_t size) = 0;
+  virtual bool finishImpl(uint64_t offset, uint32_t size) = 0;
   virtual bool writeImpl(uint64_t offset, uint32_t size, const void* value) = 0;
   virtual bool readImpl(uint64_t offset, uint32_t size, void* value) = 0;
   virtual void flushImpl() = 0;
@@ -172,6 +185,15 @@ class Device {
 
   // alignment granularity for the offsets and size to read/write calls.
   const uint32_t ioAlignmentSize_{kDefaultAlignmentSize};
+
+  // Zone Size
+  const uint64_t ioZoneSize_{0};
+
+  // Zone Cap Size
+  const uint64_t ioZoneCapSize_{0};
+
+  // Number of zones
+  const uint64_t ioNoOfZones_{0};
 
   // When write-io is issued, it is broken down into writeImpl calls at
   // this granularity. maxWriteSize_ 0 means no maximum write size.
@@ -205,6 +227,14 @@ std::unique_ptr<Device> createMemoryDevice(
     uint64_t size,
     std::shared_ptr<DeviceEncryptor> encryptor,
     uint32_t ioAlignSize = 1);
+
+std::unique_ptr<Device> createDirectIoZNSDevice(
+    std::string fileName,
+    uint64_t size,
+    uint32_t ioAlignSize,
+    std::shared_ptr<DeviceEncryptor> encryptor,
+    uint32_t maxDeviceWriteSize);
+
 } // namespace navy
 } // namespace cachelib
 } // namespace facebook

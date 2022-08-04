@@ -51,6 +51,7 @@ else()
 endif()
 
 target_link_libraries(cachelib_navy PUBLIC
+  zbd
   cachelib_common
   )
 

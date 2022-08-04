@@ -207,6 +207,21 @@ std::unique_ptr<Device> createFileDevice(
     std::shared_ptr<DeviceEncryptor> encryptor,
     uint32_t maxDeviceWriteSize);
 
+// Manages a direct IO ZNS device.
+//
+// @param fileName              name of the drive
+// @param singleFileSize        size of the file
+// @param truncateFile          whether to truncate the file
+// @param blockSize             device block size
+// @param encryptor             encryption object
+// @param maxDeviceWriteSize    device maximum granularity of writes
+std::unique_ptr<Device> createZNSDevice(
+    std::string fileName,
+    uint64_t singleFileSize,
+    uint32_t blockSize,
+    std::shared_ptr<DeviceEncryptor> encryptor,
+    uint32_t maxDeviceWriteSize);
+
 } // namespace navy
 } // namespace cachelib
 } // namespace facebook

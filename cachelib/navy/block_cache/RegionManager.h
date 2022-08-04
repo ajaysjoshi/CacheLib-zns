@@ -249,6 +249,10 @@ class RegionManager {
     return baseOffset_ + toAbsolute(addr).offset();
   }
 
+  uint64_t physicalOffsetZone(RelAddress addr, uint64_t znsz) const {
+    return baseOffset_ + (addr.offset() + addr.rid().index() * znsz);
+  }
+
   bool deviceWrite(RelAddress addr, Buffer buf);
 
   bool isValidIORange(uint32_t offset, uint32_t size) const;

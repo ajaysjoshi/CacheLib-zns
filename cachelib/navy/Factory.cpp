@@ -398,6 +398,16 @@ std::unique_ptr<Device> createFileDevice(
                                   std::move(encryptor), maxDeviceWriteSize);
 }
 
+std::unique_ptr<Device> createZNSDevice(
+    std::string fileName,
+    uint64_t singleFileSize,
+    uint32_t blockSize,
+    std::shared_ptr<navy::DeviceEncryptor> encryptor,
+    uint32_t maxDeviceWriteSize) {
+  return createDirectIoZNSDevice(std::move(fileName),singleFileSize, blockSize,
+                                  std::move(encryptor), maxDeviceWriteSize);
+}
+
 } // namespace navy
 } // namespace cachelib
 } // namespace facebook

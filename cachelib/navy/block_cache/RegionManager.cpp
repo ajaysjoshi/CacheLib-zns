@@ -158,6 +158,10 @@ void RegionManager::releaseCleanedupRegion(RegionId rid) {
   // Reset all region internal state, making it ready to be
   // used by a region allocator.
   region.reset();
+  if (device_.getIOZoneSize()) {
+        auto physOffsetzone = physicalOffsetZone(RelAddress{rid, 0}, device_.getIOZoneSize());
+        device_.reset(physOffsetzone,regionSize());
+  }
   {
     std::lock_guard<std::mutex> lock{cleanRegionsMutex_};
     cleanRegions_.push_back(rid);
@@ -389,6 +393,12 @@ void RegionManager::releaseEvictedRegion(RegionId rid,
   // Reset all region internal state, making it ready to be
   // used by a region allocator.
   region.reset();
+  if (device_.getIOZoneSize()) {
+      auto physOffsetzone = physicalOffsetZone(RelAddress{rid, 0}, device_.getIOZoneSize());
+      if (device_.reset(physOffsetzone,regionSize()) == false) {
+        XLOG(INFO) << "Error: " << "Cannot reset region";
+      }
+  }
   {
     std::lock_guard<std::mutex> lock{cleanRegionsMutex_};
     reclaimsScheduled_--;
@@ -489,8 +499,14 @@ bool RegionManager::deviceWrite(RelAddress addr, Buffer buf) {
   const auto bufSize = buf.size();
   XDCHECK(isValidIORange(addr.offset(), bufSize));
   auto physOffset = physicalOffset(addr);
+  if (device_.getIOZoneSize())
+      physOffset = physicalOffsetZone(addr,  device_.getIOZoneSize());
+
   if (!device_.write(physOffset, std::move(buf))) {
     return false;
+  }
+  if (device_.getIOZoneSize()) {
+    device_.finish(physOffset, device_.getIOZoneSize());
   }
   physicalWrittenCount_.add(bufSize);
   return true;
@@ -517,7 +533,11 @@ Buffer RegionManager::read(const RegionDescriptor& desc,
   }
   XDCHECK(isValidIORange(addr.offset(), size));
 
-  return device_.read(physicalOffset(addr), size);
+  auto physOffset = physicalOffset(addr);
+  if (device_.getIOZoneSize()) {
+      physOffset = physicalOffsetZone(addr,  device_.getIOZoneSize());
+  }
+  return device_.read(physOffset, size);
 }
 
 void RegionManager::flush() { device_.flush(); }

@@ -21,6 +21,7 @@
 
 #include <cstring>
 #include <numeric>
+#include "libzbd/zbd.h"
 
 namespace facebook {
 namespace cachelib {
@@ -63,6 +64,14 @@ class FileDevice final : public Device {
   }
 
   void flushImpl() override { ::fsync(file_.fd()); }
+
+  bool finishImpl(uint64_t offset, uint32_t len) {
+    return true;
+  }
+
+  bool resetImpl(uint64_t offset, uint32_t size) override {
+	return true;
+  }
 
   void reportIOError(const char* opName,
                      uint64_t offset,
@@ -124,6 +133,14 @@ class RAID0Device final : public Device {
     for (const auto& f : fvec_) {
       ::fsync(f.fd());
     }
+  }
+
+  bool finishImpl(uint64_t offset, uint32_t len) {
+    return true;
+  }
+
+  bool resetImpl(uint64_t offset, uint32_t size) override {
+	return true;
   }
 
   bool doIO(uint64_t offset,
@@ -204,13 +221,91 @@ class MemoryDevice final : public Device {
     return true;
   }
 
+  bool finishImpl(uint64_t offset, uint32_t len) {
+    return true;
+  }
+
   void flushImpl() override {
     // Noop
   }
 
+  bool resetImpl(uint64_t offset, uint32_t size) override {
+	return true;
+  }
+
   std::unique_ptr<uint8_t[]> buffer_;
 };
-} // namespace
+
+// ZNS Device
+class ZNSDevice : public Device {
+  public:
+    explicit ZNSDevice(int dev,
+    struct zbd_info *info,
+    struct zbd_zone *report,
+    uint32_t nr_zones,
+    uint64_t zoneMask,
+    uint64_t size,
+    uint32_t ioAlignSize,
+    uint64_t ioZoneCapSize,
+    uint64_t ioZoneSize,
+    std::shared_ptr<DeviceEncryptor> encryptor,
+    uint32_t maxDeviceWriteSize)
+    : Device{size, std::move(encryptor), ioAlignSize,
+    maxDeviceWriteSize, nr_zones,
+           ioZoneSize, ioZoneCapSize},
+    dev_{std::move(dev)},
+    info_{info},
+    report_{std::move(report)},
+    nr_zones_{std::move(nr_zones)},
+    zoneMask_ {std::move(zoneMask)},
+    ioZoneCapSize_{std::move(ioZoneCapSize)}
+    {
+    }
+    ZNSDevice(const ZNSDevice&) = delete;
+    ZNSDevice& operator=(const ZNSDevice&) = delete;
+
+    ~ZNSDevice() override = default;
+
+  private:
+    const int dev_{};
+    struct zbd_info *info_;
+    struct zbd_zone *report_;
+    unsigned int nr_zones_;
+    unsigned int zoneMask_;
+    uint64_t ioZoneCapSize_;
+
+    bool finishImpl(uint64_t offset, uint32_t len) override{
+      if (zbd_finish_zones(dev_, offset, len) < 0)
+        return false;
+      return true;
+    }
+
+    bool resetImpl(uint64_t offset, uint32_t len) override{
+      if (!finishImpl(offset, len))
+        return false;
+      if (zbd_reset_zones(dev_, offset, len) < 0)
+        return false;
+      return true;
+    }
+
+    bool writeImpl(uint64_t offset, uint32_t size, const void* value) override {
+      ssize_t bytesWritten;
+
+      bytesWritten = ::pwrite(dev_, value, size, offset);
+      if (bytesWritten != size)
+        XLOG(INFO) << "Error Writing to zone! offset" << offset
+          << " size: " << size << " bytesWritten: " << bytesWritten;
+      return bytesWritten == size;
+    }
+
+    bool readImpl(uint64_t offset, uint32_t size, void* value) override {
+      ssize_t bytesRead;
+      bytesRead = ::pread(dev_, value, size, offset);
+      return bytesRead == size;
+    }
+    void flushImpl() override { ::fsync(dev_); }
+    };
+}
 
 bool Device::write(uint64_t offset, Buffer buffer) {
   const auto size = buffer.size();
@@ -350,6 +445,65 @@ std::unique_ptr<Device> createDirectIoFileDevice(
   XDCHECK(folly::isPowTwo(ioAlignSize));
   return std::make_unique<FileDevice>(std::move(file), size, ioAlignSize,
                                       std::move(encryptor), maxDeviceWriteSize);
+}
+
+std::unique_ptr<Device> createDirectIoZNSDevice(
+    std::string fileName,
+    uint64_t size,
+    uint32_t ioAlignSize,
+    std::shared_ptr<DeviceEncryptor> encryptor,
+    uint32_t maxDeviceWriteSize) {
+
+   struct zbd_zone *report;
+   struct zbd_info *info;
+    int flags{O_RDWR | O_DIRECT};
+    int fd, ret;
+    uint32_t nr_zones, zoneMask;
+    uint64_t ioZoneCapSize, actDevSize;
+     int count;
+
+    info = new zbd_info();
+    fd = zbd_open(fileName.c_str(), flags, info);
+    if (fd <0) {
+         XLOG(ERR) << "Exception in zns device: " << errno;
+    }
+
+    ret = zbd_list_zones(fd,
+                     0, 0, ZBD_RO_ALL,
+                     &report, &nr_zones);
+    if (ret < 0 || !nr_zones) {
+           XLOG(ERR) << "report zone " << nr_zones;
+    }
+
+    for (count =0, actDevSize = 0; count < nr_zones; count++)
+        actDevSize += report[count].capacity;
+
+    /* minimum zone capacity */
+    /* TODO: Done for region size,
+    we should be able to map each region to different size */
+    for (count =0, ioZoneCapSize = 0; count < nr_zones; count++)
+      if (!ioZoneCapSize || ioZoneCapSize > report[count].capacity)
+            ioZoneCapSize = report[count].capacity;
+
+   if (size > actDevSize)
+    throw std::invalid_argument(
+      folly::sformat("Size should be alligned to ZNS drive: drive size {} MB", actDevSize/(1024 * 1024)));
+
+    if (size % ioZoneCapSize)
+     throw std::invalid_argument(
+       folly::sformat("Size should be alligned to ZNS drive: capacity {} MB: Needed Size: {} MB", ioZoneCapSize/(1024 * 1024),
+         (((size/ ioZoneCapSize) + 1) * ioZoneCapSize)/(1024 * 1024)));
+
+    if (size < actDevSize)
+        nr_zones = size/ioZoneCapSize;
+    zoneMask = info->zone_size - 1;
+
+    return std::make_unique<ZNSDevice>(std::move(fd), std::move(info),
+                                      std::move(report), std::move(nr_zones),
+                                      zoneMask, size, ioAlignSize,
+                                      ioZoneCapSize,zoneMask + 1,
+                                      std::move(encryptor),
+                                      maxDeviceWriteSize /* max device write size */);
 }
 
 std::unique_ptr<Device> createDirectIoRAID0Device(

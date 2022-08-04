@@ -43,6 +43,7 @@ const uint64_t deviceMetadataSize = 1024 * 1024 * 1024;
 const uint64_t fileSize = 10 * 1024 * 1024;
 const bool truncateFile = false;
 const uint32_t deviceMaxWriteSize = 4 * 1024 * 1024;
+const uint32_t zonedDevice = false;
 
 // BlockCache settings
 const uint32_t blockCacheRegionSize = 16 * 1024 * 1024;
@@ -87,6 +88,7 @@ void setDeviceTestSettings(NavyConfig& config) {
   config.setRaidFiles(raidPaths, fileSize, truncateFile);
   config.setDeviceMetadataSize(deviceMetadataSize);
   config.setDeviceMaxWriteSize(deviceMaxWriteSize);
+  config.setZonedDevice(zonedDevice);
 }
 
 void setBlockCacheTestSettings(NavyConfig& config) {
@@ -205,6 +207,7 @@ TEST(NavyConfigTest, Serialization) {
   expectedConfigMap["navyConfig::readerThreads"] = "40";
   expectedConfigMap["navyConfig::writerThreads"] = "40";
   expectedConfigMap["navyConfig::navyReqOrderingShards"] = "30";
+  expectedConfigMap["navyConfig::zonedDevice"] = "false";
 
   EXPECT_EQ(configMap, expectedConfigMap);
 }

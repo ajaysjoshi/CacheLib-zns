@@ -111,6 +111,15 @@ update_submodules=
 cmake_custom_params=
 
 case "$1" in
+
+libzbd2)
+    NAME=libzbd
+    REPO=https://github.com/westerndigitalcorporation/libzbd.git
+    REPODIR=cachelib/external/$NAME
+    SRCDIR=$REPODIR
+    external_git_clone=yes
+    ;;
+
   googlelog)
     NAME=glog
     REPO=https://github.com/google/glog
@@ -341,8 +350,16 @@ cd "build-$NAME" || die "'cd' failed"
 ## Build
 ##
 if test "$build" ; then
+  if test "$NAME" = "libzbd" ; then
+	cp -rf ../$REPODIR/* ../build-$NAME/
+	sh ./autogen.sh
+	./configure
+	sudo make install
+	./configure --prefix=$PREFIX --disable-gui
+else
   # shellcheck disable=SC2086
   cmake $CMAKE_PARAMS "../$SRCDIR" || die "cmake failed on $SRCDIR"
+fi
   # shellcheck disable=SC2086
   nice make $MAKE_PARAMS || die "make failed"
 fi

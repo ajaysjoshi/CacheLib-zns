@@ -28,6 +28,14 @@ namespace cachelib {
 
 namespace {
 
+struct ZNSArgs{
+  const navy::Device *dev_{0};
+  bool usesZonedDevice_{0};
+  uint32_t ioUsedZones_{0};
+  uint64_t bcStartZone_{0};
+  uint64_t bcEndZone_{0};
+};
+
 // Default value for (almost) 1TB flash device = 5GB reserved for metadata
 constexpr double kDefaultMetadataPercent = 0.5;
 uint64_t megabytesToBytes(uint64_t mb) { return mb << 20; }
@@ -98,7 +106,8 @@ void setupBlockCache(const navy::BlockCacheConfig& blockCacheConfig,
                      uint64_t metadataSize,
                      bool usesRaidFiles,
                      bool itemDestructorEnabled,
-                     cachelib::navy::CacheProto& proto) {
+                     cachelib::navy::CacheProto& proto,
+                     ZNSArgs &usesZnsArg) {
   auto regionSize = blockCacheConfig.getRegionSize();
   if (regionSize != alignUp(regionSize, ioAlignSize)) {
     throw std::invalid_argument(
@@ -118,8 +127,31 @@ void setupBlockCache(const navy::BlockCacheConfig& blockCacheConfig,
   }
   blockCacheSize = alignDown(blockCacheSize, regionSize);
 
-  XLOG(INFO) << "blockcache: starting offset: " << blockCacheOffset
-             << ", block cache size: " << blockCacheSize;
+  if (usesZnsArg.usesZonedDevice_) {
+    if (usesZnsArg.dev_->getIOZoneCapSize() != regionSize) {
+        throw std::invalid_argument(
+            folly::sformat("Region size: {} MB is not aligned to ZoneCapSize: {} MB",
+                   regionSize/(1024 * 1024),
+                   usesZnsArg.dev_->getIOZoneCapSize()/(1024 * 1024)));
+    }
+    auto adjustedBlockCacheOffset = 0;
+    auto cacheSizeAdjustment =
+            (usesZnsArg.dev_->getIONrOfZones() -
+            usesZnsArg.ioUsedZones_) * usesZnsArg.dev_->getIOZoneCapSize();
+
+    adjustedBlockCacheOffset = alignUp(adjustedBlockCacheOffset,
+      usesZnsArg.dev_->getIOZoneSize());
+    usesZnsArg.bcStartZone_ = adjustedBlockCacheOffset;
+    blockCacheSize = cacheSizeAdjustment;
+    blockCacheOffset = adjustedBlockCacheOffset;
+    usesZnsArg.bcEndZone_ = adjustedBlockCacheOffset +
+      (usesZnsArg.dev_->getIONrOfZones() -
+                    usesZnsArg.ioUsedZones_) *
+                        usesZnsArg.dev_->getIOZoneSize();
+    usesZnsArg.ioUsedZones_ +=
+      (usesZnsArg.dev_->getIONrOfZones() -
+                    usesZnsArg.ioUsedZones_);
+  }
 
   auto blockCache = cachelib::navy::createBlockCacheProto();
   blockCache->setLayout(blockCacheOffset, blockCacheSize, regionSize);
@@ -168,10 +200,34 @@ void setupCacheProtos(const navy::NavyConfig& config,
   const uint64_t totalCacheSize = device.getSize();
 
   auto metadataSize = config.getDeviceMetadataSize();
-  if (metadataSize == 0) {
+  ZNSArgs  useZnsArgs;
+
+  if (metadataSize == 0 && !config.usesZonedDevice()) {
     metadataSize = getDefaultMetadataSize(totalCacheSize, ioAlignSize);
   }
+
+  if (config.usesZonedDevice()) {
+    useZnsArgs.dev_ = &device;
+    useZnsArgs.usesZonedDevice_ =
+                config.usesZonedDevice();
+    useZnsArgs.ioUsedZones_ = 0;
+    useZnsArgs.bcStartZone_ = 0;
+    if (config.isBigHashEnabled())
+      throw std::invalid_argument{
+        folly::sformat("invalid  configuration: cannot enable big in ZNS")};
+ }
+
   metadataSize = alignUp(metadataSize, ioAlignSize);
+
+  if (config.usesZonedDevice()) {
+     useZnsArgs.bcStartZone_ =
+               useZnsArgs.ioUsedZones_ *
+                     useZnsArgs.dev_->getIOZoneCapSize();
+     useZnsArgs.ioUsedZones_ = metadataSize /useZnsArgs.dev_->getIOZoneCapSize();
+     if (metadataSize %useZnsArgs.dev_->getIOZoneCapSize())
+        useZnsArgs.ioUsedZones_++;
+  }
+
   if (metadataSize >= totalCacheSize) {
     throw std::invalid_argument{
         folly::sformat("Invalid metadata size: {}. Cache size: {}",
@@ -195,8 +251,9 @@ void setupCacheProtos(const navy::NavyConfig& config,
   // Set up BlockCache if enabled
   if (blockCacheSize > 0) {
     setupBlockCache(config.blockCache(), blockCacheSize, ioAlignSize,
-                    metadataSize, config.usesRaidFiles(), itemDestructorEnabled,
-                    proto);
+                    metadataSize, config.usesRaidFiles(),
+                    itemDestructorEnabled,
+                    proto, useZnsArgs);
   }
 }
 
@@ -232,7 +289,14 @@ std::unique_ptr<cachelib::navy::Device> createDevice(
   auto blockSize = config.getBlockSize();
   auto maxDeviceWriteSize = config.getDeviceMaxWriteSize();
 
-  if (config.usesRaidFiles()) {
+ if (config.usesZonedDevice()) {
+	return cachelib::navy::createZNSDevice(
+        config.getFileName(),
+        config.getFileSize(),
+        blockSize,
+        std::move(encryptor),
+        maxDeviceWriteSize > 0 ? alignDown(maxDeviceWriteSize, blockSize) : 0);
+ }else if (config.usesRaidFiles()) {
     auto stripeSize = config.getRaidStripeSize();
     return cachelib::navy::createRAIDDevice(
         config.getRaidPaths(),
