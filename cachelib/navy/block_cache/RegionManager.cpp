@@ -158,6 +158,16 @@ void RegionManager::releaseCleanedupRegion(RegionId rid) {
   // Reset all region internal state, making it ready to be
   // used by a region allocator.
   region.reset();
+
+  // In case of zone device reset the zone mapped
+  // to the regions before using it again
+  if (device_.doZoneOp(Device::ZONE_DEVICE)){
+    auto physOffset =
+      device_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET,
+            physicalOffset(RelAddress{rid, 0}));
+    if (!device_.doZoneOp(Device::ZONE_RESET, physOffset))
+      XLOG(ERR) << "Cannot reset region: " << physOffset;
+  }
   {
     std::lock_guard<std::mutex> lock{cleanRegionsMutex_};
     cleanRegions_.push_back(rid);
@@ -389,6 +399,15 @@ void RegionManager::releaseEvictedRegion(RegionId rid,
   // Reset all region internal state, making it ready to be
   // used by a region allocator.
   region.reset();
+  // In case of zone device reset the zone mapped
+  // to the regions before using it again
+  if (device_.doZoneOp(Device::ZONE_DEVICE)) {
+    auto physOffset =
+      device_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET,
+        physicalOffset(RelAddress{rid, 0}));
+    if (!device_.doZoneOp(Device::ZONE_RESET, physOffset))
+      XLOG(ERR) << "Cannot reset region: " << physOffset;
+  }
   {
     std::lock_guard<std::mutex> lock{cleanRegionsMutex_};
     reclaimsScheduled_--;
@@ -489,9 +508,30 @@ bool RegionManager::deviceWrite(RelAddress addr, Buffer buf) {
   const auto bufSize = buf.size();
   XDCHECK(isValidIORange(addr.offset(), bufSize));
   auto physOffset = physicalOffset(addr);
+  // If zoned, get the address of zone for the region
+  if (device_.doZoneOp(Device::ZONE_DEVICE))
+    physOffset =
+      device_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET, physOffset);
+
   if (!device_.write(physOffset, std::move(buf))) {
     return false;
   }
+
+  // Finish the zone when the write is complete
+  // Zone state Tansition:
+  // OPEN->FULL->CLOSE(FINISH)
+  // In case zone is not FULL, then it is still active,
+  // which could expire the max active zone setting of the device.
+  // The max active zone, specifies max number
+  // of zones that can be in non-FULL or non-CLOSED state.
+  // If buffer size is not equal to zone size, then that zone
+  // is not auto transitioned to FULL and hence CLOSE.
+  // So here we explicity tranistion the zone to CLOSE
+  if (device_.doZoneOp(Device::ZONE_DEVICE)) {
+    if (bufSize != device_.doZoneOp(Device::ZONE_SIZE))
+      device_.doZoneOp(Device::ZONE_FINISH, physOffset);
+  }
+
   physicalWrittenCount_.add(bufSize);
   return true;
 }
@@ -517,7 +557,12 @@ Buffer RegionManager::read(const RegionDescriptor& desc,
   }
   XDCHECK(isValidIORange(addr.offset(), size));
 
-  return device_.read(physicalOffset(addr), size);
+  auto physOffset = physicalOffset(addr);
+  // If zoned, get the address of zone for the region
+  if (device_.doZoneOp(Device::ZONE_DEVICE))
+    physOffset = device_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET, physOffset);
+
+  return device_.read(physOffset, size);
 }
 
 void RegionManager::flush() { device_.flush(); }
