@@ -173,6 +173,7 @@ std::map<std::string, std::string> NavyConfig::serialize() const {
       std::to_string(deviceMetadataSize_);
   configMap["navyConfig::fileSize"] = folly::to<std::string>(fileSize_);
   configMap["navyConfig::truncateFile"] = truncateFile_ ? "true" : "false";
+  configMap["navyConfig::zonedDevice"] = zonedDevice_ ? "true" : "false";
   configMap["navyConfig::deviceMaxWriteSize"] =
       folly::to<std::string>(deviceMaxWriteSize_);
 

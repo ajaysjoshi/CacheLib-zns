@@ -97,6 +97,7 @@ void setupBlockCache(const navy::BlockCacheConfig& blockCacheConfig,
                      uint32_t ioAlignSize,
                      uint64_t metadataSize,
                      bool usesRaidFiles,
+                     bool usesZonedFile,
                      bool itemDestructorEnabled,
                      cachelib::navy::CacheProto& proto) {
   auto regionSize = blockCacheConfig.getRegionSize();
@@ -114,6 +115,15 @@ void setupBlockCache(const navy::BlockCacheConfig& blockCacheConfig,
     auto cacheSizeAdjustment = adjustedBlockCacheOffset - blockCacheOffset;
     XDCHECK_LT(cacheSizeAdjustment, blockCacheSize);
     blockCacheSize -= cacheSizeAdjustment;
+    blockCacheOffset = adjustedBlockCacheOffset;
+  }
+
+  if (usesZonedFile) {
+    uint64_t totalMetaRegions = metadataSize/regionSize;
+    uint64_t adjustedBlockCacheOffset;
+    if (metadataSize % regionSize)
+      totalMetaRegions++;
+    adjustedBlockCacheOffset = alignUp(totalMetaRegions * regionSize, regionSize);
     blockCacheOffset = adjustedBlockCacheOffset;
   }
   blockCacheSize = alignDown(blockCacheSize, regionSize);
@@ -184,6 +194,9 @@ void setupCacheProtos(const navy::NavyConfig& config,
 
   // Set up BigHash if enabled
   if (config.isBigHashEnabled()) {
+      if (config.usesZonedFile())
+        throw std::invalid_argument{
+         folly::sformat("Big Hash is not supported in zoned drive.")};
     auto bigHashCacheOffset = setupBigHash(config.bigHash(), ioAlignSize,
                                            totalCacheSize, metadataSize, proto);
     blockCacheSize = bigHashCacheOffset - metadataSize;
@@ -195,8 +208,8 @@ void setupCacheProtos(const navy::NavyConfig& config,
   // Set up BlockCache if enabled
   if (blockCacheSize > 0) {
     setupBlockCache(config.blockCache(), blockCacheSize, ioAlignSize,
-                    metadataSize, config.usesRaidFiles(), itemDestructorEnabled,
-                    proto);
+                    metadataSize, config.usesRaidFiles(),
+                    config.usesZonedFile(), itemDestructorEnabled, proto);
   }
 }
 
@@ -231,8 +244,18 @@ std::unique_ptr<cachelib::navy::Device> createDevice(
     std::shared_ptr<navy::DeviceEncryptor> encryptor) {
   auto blockSize = config.getBlockSize();
   auto maxDeviceWriteSize = config.getDeviceMaxWriteSize();
-
-  if (config.usesRaidFiles()) {
+  if (config.usesZonedFile()) {
+    // Create ZNS device - for block cache
+    // Big hash and metdata still go into
+    // conventional device
+    return cachelib::navy::createZNSDevice(
+        config.getFileName(),
+        config.getFileSize(),
+        (uint64_t)config.blockCache().getRegionSize(),
+        blockSize,
+        encryptor,
+        maxDeviceWriteSize > 0 ? alignDown(maxDeviceWriteSize, config.getBlockSize()) : 0);
+  }else if (config.usesRaidFiles()) {
     auto stripeSize = config.blockCache().getRegionSize();
     return cachelib::navy::createRAIDDevice(
         config.getRaidPaths(),
