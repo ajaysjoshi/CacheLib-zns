@@ -77,18 +77,27 @@ class DeviceMetaDataWriter final : public RecordWriter {
     // Write the last remaining bytes to the device
     if (bufIndex_ > 0) {
       if (offset_ + blockSize_ < metadataSize_) {
+        uint64_t phyOffset = offset_;
         Buffer buffer = dev_.makeIOBuffer(blockSize_);
         memcpy(buffer.data(), bufferData, bufIndex_);
         memset(buffer.data() + bufIndex_, 0, blockSize_ - bufIndex_);
-        dev_.write(offset_, std::move(buffer));
+        if (dev_.doZoneOp(Device::ZONE_DEVICE)) {
+          if (!offset_)
+            phyOffset = dev_.doZoneOp(Device::ZONE_RESET, offset_);
+          phyOffset = dev_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET, offset_);
+        }
+        dev_.write(phyOffset, std::move(buffer));
         offset_ += blockSize_;
       }
     }
     if (offset_ + blockSize_ <= metadataSize_) {
+      uint64_t phyOffset = offset_;
       // Write an additional block of zeroed out memory just to make the end
       // of metadata clear
       Buffer buffer = dev_.makeIOBuffer(blockSize_);
       memset(buffer.data(), 0, blockSize_);
+      if (dev_.doZoneOp(Device::ZONE_DEVICE))
+          phyOffset = dev_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET, offset_);
       dev_.write(offset_, std::move(buffer));
     }
   }
@@ -108,12 +117,18 @@ class DeviceMetaDataWriter final : public RecordWriter {
 
     auto flushBuffer = [=]() mutable {
       auto extraBytes = blockSize_ - bufIndex_;
+      uint64_t phyOffset = offset_;
       // zero the unused bytes in the buffer
       memset(&bufferData[bufIndex_], 0, extraBytes);
       Buffer buffer = dev_.makeIOBuffer(blockSize_);
       memcpy(buffer.data(), bufferData, blockSize_);
+      if (dev_.doZoneOp(Device::ZONE_DEVICE)) {
+        if (!offset_)
+          phyOffset = dev_.doZoneOp(Device::ZONE_RESET, offset_);
+        phyOffset = dev_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET, offset_);
+      }
 
-      if (!dev_.write(offset_, std::move(buffer))) {
+      if (!dev_.write(phyOffset, std::move(buffer))) {
         throw std::invalid_argument(
             folly::sformat("write failed: offset = {}", offset_));
       }
@@ -150,6 +165,9 @@ class DeviceMetaDataWriter final : public RecordWriter {
   bool invalidate() override {
     Buffer invalidateBuffer{blockSize_, blockSize_};
     memset(invalidateBuffer.data(), 0, blockSize_);
+    if (dev_.doZoneOp(Device::ZONE_DEVICE))
+        return (bool)dev_.doZoneOp(
+          Device::ZONE_RESET, 0, metadataSize_);
     return dev_.write(0, std::move(invalidateBuffer));
   }
 
@@ -180,8 +198,10 @@ class DeviceMetaDataReader final : public RecordReader {
     uint64_t size = 0;
     uint8_t* data = nullptr;
     auto dataOffset = 0;
+    uint64_t phyOffset;
 
     do {
+      phyOffset = offset_;
       // This is true when we have to read a header and there are not
       // enough bytes in the buffer OR we have to read the next block
       // in the multi-block read
@@ -191,8 +211,10 @@ class DeviceMetaDataReader final : public RecordReader {
         if (offset_ + blockSize_ > metadataSize_) {
           throw std::logic_error("exceeding metadata limit");
         }
+        if (dev_.doZoneOp(Device::ZONE_DEVICE))
+          phyOffset = dev_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET, offset_);
         // read from device to the middle of the buffer 'kReadOffset'
-        if (!dev_.read(offset_, blockSize_, bufferData)) {
+        if (!dev_.read(phyOffset, blockSize_, bufferData)) {
           throw std::invalid_argument(
               folly::sformat("read failed: offset = {}", offset_));
         }
@@ -245,10 +267,13 @@ class DeviceMetaDataReader final : public RecordReader {
 
   bool isEnd() const override {
     Buffer headerBuf{blockSize_, blockSize_};
+    uint64_t phyOffset = offset_;
     if (offset_ + blockSize_ > metadataSize_) {
       return true;
     }
-    auto res = dev_.read(offset_, blockSize_, headerBuf.data());
+    if (dev_.doZoneOp(Device::ZONE_DEVICE))
+      phyOffset = dev_.doZoneOp(Device::ZONE_ADDR_FROM_OFFSET, offset_);
+    auto res = dev_.read(phyOffset, blockSize_, headerBuf.data());
     if (!res) {
       return true;
     }
