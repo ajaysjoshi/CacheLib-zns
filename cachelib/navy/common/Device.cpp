@@ -22,6 +22,65 @@
 #include <cstring>
 #include <numeric>
 
+// If BlockZoned header doesn't exist,
+// then define all the required definitions
+#ifdef NO_BLOCKZONED
+//From linux/blkzoned.h
+struct blk_zone {
+  uint64_t   start;          /* Zone start sector */
+  uint64_t   len;            /* Zone length in number of sectors */
+  uint64_t   wp;             /* Zone write pointer position */
+  uint8_t     type;           /* Zone type */
+  uint8_t     cond;           /* Zone condition */
+  uint8_t     non_seq;        /* Non-sequential write resources active */
+  uint8_t     reset;          /* Reset write pointer recommended */
+  uint8_t     reserved[36];
+};
+
+struct blk_zone_report {
+  uint64_t  sector;
+  uint32_t  nr_zones;
+  uint8_t    reserved[4];
+  struct blk_zone zones[0];
+};
+
+struct blk_zone_range {
+  uint64_t  sector;
+  uint64_t  nr_sectors;
+};
+
+#ifndef BLKRESETZONE
+#define BLKRESETZONE    _IOW(0x12, 131, struct blk_zone_range)
+#endif
+#ifndef BLKREPORTZONE
+#define BLKREPORTZONE   _IOWR(0x12, 130, struct blk_zone_report)
+#endif
+#ifndef BLKGETZONESZ
+#define BLKGETZONESZ    _IOR(0x12, 132, __u32)
+#endif
+#ifndef BLKGETNRZONES
+#define BLKGETNRZONES   _IOR(0x12, 133, __u32)
+#endif
+/*
+* BLKFINISHZONE ioctl commands
+* were introduced with kernel 5.5. If they are not defined on the
+* current system, manually define these operations here to generate
+* code portable to newer kernels.
+*/
+
+#ifndef BLKFINISHZONE
+#define BLKFINISHZONE _IOW(0x12, 136, struct blk_zone_range)
+#endif
+
+#else
+#include <linux/blkzoned.h>
+#ifndef BLKFINISHZONE
+#define BLKFINISHZONE _IOW(0x12, 136, struct blk_zone_range)
+#endif
+#endif
+
+#include <sys/ioctl.h>
+
 namespace facebook {
 namespace cachelib {
 namespace navy {
@@ -75,6 +134,11 @@ class FileDevice final : public Device {
                        std::strerror(errno)));
   }
 
+  uint64_t doZoneOpImpl(ZoneOpEnum optype,
+    uint64_t arg1, uint64_t arg2) override {
+    return 0;
+  }
+
   const folly::File file_{};
 };
 
@@ -124,6 +188,11 @@ class RAID0Device final : public Device {
     for (const auto& f : fvec_) {
       ::fsync(f.fd());
     }
+  }
+
+  uint64_t doZoneOpImpl(ZoneOpEnum optype,
+    uint64_t arg1, uint64_t arg2) override {
+    return 0;
   }
 
   bool doIO(uint64_t offset,
@@ -208,9 +277,136 @@ class MemoryDevice final : public Device {
     // Noop
   }
 
+  uint64_t doZoneOpImpl(ZoneOpEnum optype,
+    uint64_t arg1, uint64_t arg2) override {
+    return 0;
+  }
+
   std::unique_ptr<uint8_t[]> buffer_;
 };
-} // namespace
+
+// ZNS Device
+class ZNSDevice final : public Device {
+public:
+
+  //512B sector size shift.
+  #define SECTOR_SHIFT 9
+  #define MAX_NO_OF_ZONES 8192
+
+  explicit ZNSDevice(int dev,
+  uint64_t size,
+  uint32_t ioAlignSize,
+  uint64_t zoneSize,
+  uint64_t  zoneCapacity,
+  struct blk_zone *zoneLogPage,
+  struct blk_zone_report *zoneReport,
+  std::shared_ptr<DeviceEncryptor> encryptor,
+  uint32_t maxDeviceWriteSize)
+  : Device{size, std::move(encryptor), ioAlignSize,
+  maxDeviceWriteSize},
+  dev_{std::move(dev)},
+  zoneSize_ {std::move(zoneSize)},
+  zoneCapacity_ {std::move(zoneCapacity)},
+  zoneLogPage_ {std::move(zoneLogPage)},
+  zoneReport_ {std::move(zoneReport)}
+  {
+  }
+  ZNSDevice(const ZNSDevice&) = delete;
+  ZNSDevice& operator=(const ZNSDevice&) = delete;
+
+  ~ZNSDevice() override = default;
+
+private:
+  const int dev_{};
+  uint64_t  zoneSize_;
+  uint64_t  zoneCapacity_;
+  struct blk_zone *zoneLogPage_;
+  struct blk_zone_report *zoneReport_;
+
+  uint64_t  finish(uint64_t offset, uint64_t len) {
+    struct blk_zone_range range;
+
+    range.sector = offset >> SECTOR_SHIFT;
+    range.nr_sectors = zoneSize_ >> SECTOR_SHIFT;
+    if (::ioctl(dev_, BLKFINISHZONE, &range) < 0) {
+      XLOG_EVERY_N_THREAD(ERR, 1000,
+          folly::sformat(
+              "Finish error: {} logicalOffset={} ret={} errno={} "
+              "({})",
+              BLKFINISHZONE,
+              offset,
+              errno,
+              std::strerror(errno)));
+      return (uint64_t)false;
+   }
+    return (uint64_t)true;
+  }
+
+  uint64_t reset(uint64_t offset, uint64_t len) {
+    struct blk_zone_range range;
+
+    range.sector = offset >> SECTOR_SHIFT;
+    range.nr_sectors = zoneSize_ >> SECTOR_SHIFT;
+    if (::ioctl(dev_, BLKRESETZONE, &range) < 0) {
+      XLOG_EVERY_N_THREAD(  ERR, 1000,
+          folly::sformat(
+              "Rest error: {} logicalOffset={} ret={} errno={} "
+              "({})",
+              BLKRESETZONE,
+              offset,
+              errno,
+              std::strerror(errno)));
+      return (uint64_t)false;
+    }
+    return (uint64_t)true;
+  }
+
+  uint64_t len(uint64_t len) {
+    uint32_t zoneNr;
+    if (!len)
+      return zoneSize_;
+
+    zoneNr = (len/zoneCapacity_);
+    if(len % zoneCapacity_)
+      zoneNr++;
+    return zoneNr * zoneSize_;
+ }
+
+  uint64_t doZoneOpImpl(ZoneOpEnum optype,
+    uint64_t arg1, uint64_t arg2) override {
+    switch(optype) {
+      case ZONE_DEVICE:
+        return (uint64_t)true;
+      case ZONE_RESET:
+        return (uint64_t)reset(arg1, len(arg2));
+      case ZONE_FINISH:
+        return (uint64_t)finish(arg1, len(arg2));
+      case ZONE_SIZE:
+        return zoneSize_;
+      case ZONE_CAPACITY:
+        return zoneCapacity_;
+      case  ZONE_ADDR_FROM_OFFSET:
+          return (zoneLogPage_[arg1/zoneCapacity_].start << SECTOR_SHIFT)
+                  + (arg1 % zoneCapacity_);
+    }
+    return (uint64_t)false;
+  }
+
+  bool writeImpl(uint64_t offset, uint32_t size, const void* value) override {
+    ssize_t bytesWritten;
+
+    bytesWritten = ::pwrite(dev_, value, size, offset);
+    return bytesWritten == size;
+ }
+
+  bool readImpl(uint64_t offset, uint32_t size, void* value) override {
+    ssize_t bytesRead;
+    bytesRead = ::pread(dev_, value, size, offset);
+    return bytesRead == size;
+  }
+  void flushImpl() override { ::fsync(dev_); }
+  };
+}
 
 bool Device::write(uint64_t offset, Buffer buffer) {
   const auto size = buffer.size();
@@ -350,6 +546,122 @@ std::unique_ptr<Device> createDirectIoFileDevice(
   XDCHECK(folly::isPowTwo(ioAlignSize));
   return std::make_unique<FileDevice>(std::move(file), size, ioAlignSize,
                                       std::move(encryptor), maxDeviceWriteSize);
+}
+
+std::unique_ptr<Device> createDirectIoZNSDevice(
+  std::string fileName,
+  uint64_t size,
+  uint64_t regionSize,
+  uint32_t ioAlignSize,
+  std::shared_ptr<DeviceEncryptor> encryptor,
+  uint32_t maxDeviceWriteSize) {
+
+  int flags{O_RDWR | O_DIRECT};
+  int fd, ret;
+  uint32_t numZones = 0;
+  uint64_t zoneSize = 0;
+  uint64_t capSize, actDevSize;
+  int count;
+  struct blk_zone_report *rep;
+  struct blk_zone *log;
+  size_t rep_size;
+
+  rep_size = sizeof(struct blk_zone_report) +
+    (sizeof(struct blk_zone) * MAX_NO_OF_ZONES);
+  rep = (struct blk_zone_report *) new char[rep_size];
+
+  memset(rep, 0, rep_size);
+  // Open the device, get number of zones,
+  // get zone log information and zone size
+  if ((fd = ::open(fileName.c_str(), flags, 0666)) < 0)
+    throw std::invalid_argument(folly::sformat("Cannot open zoned device"));
+
+  ret = ::ioctl(fd, BLKGETNRZONES, &numZones);
+  if (ret < 0 || !numZones)
+    throw std::invalid_argument(folly::sformat("Cannot get number of zones."
+        "Not a zoned device?"));
+
+  rep->sector = 0;
+  rep->nr_zones = numZones;
+  ret = ::ioctl(fd, BLKREPORTZONE, rep);
+  if (ret < 0)
+    throw std::invalid_argument(folly::sformat("Cannot get report of zones"));
+
+  ret = ::ioctl(fd, BLKGETZONESZ, &zoneSize);
+  if (ret < 0)
+    throw std::invalid_argument(folly::sformat("Cannot get zone size"));
+
+  // SECTOR SHIFT is for 512 bytes
+  zoneSize <<= SECTOR_SHIFT;
+  log = rep->zones;
+  numZones = rep->nr_zones;
+
+  // Zone has two length information
+  // zone size - Size of the zone
+  // zone capacity - Actual Capacity of zone
+  // Capacity of the zone can be lesser than zone size
+  // Here we add all the capapcities to get the actual
+  // device size
+  for (count =0, actDevSize = 0; count < numZones; count++) {
+    uint64_t zone_capacity_size;
+
+    if (*((uint32_t*)rep->reserved) & 0x01)
+      zone_capacity_size = *((uint64_t*)&log[count].reserved[4])
+                                            << SECTOR_SHIFT;
+    else
+      zone_capacity_size = log[count].len << SECTOR_SHIFT;
+    actDevSize += zone_capacity_size;
+  }
+
+  // Get capacity to map region size
+  for (count =0, capSize = 0; count < numZones; count++) {
+    uint64_t zone_capacity_size;
+
+    if (*((uint32_t*)rep->reserved) & 0x01)
+      zone_capacity_size = *((uint64_t*)&log[count].reserved[4])
+                                              << SECTOR_SHIFT;
+    else
+      zone_capacity_size = log[count].len << SECTOR_SHIFT;
+    if (!capSize || zone_capacity_size)
+          capSize = zone_capacity_size;
+  }
+
+  // Currently region size is equal to zone capacity
+  // TODO: manage region size not equal to zone capacity
+  if (regionSize != capSize)
+    throw std::invalid_argument(
+      folly::sformat("Region Size should be alligned to"
+                          " ZNS capacity size {} MB: ", capSize/(1024 * 1024)));
+
+  // If size is not given,
+  // then use the device size.
+  if (!size)
+    size = actDevSize;
+
+  if (size > actDevSize)
+    throw std::invalid_argument(
+      folly::sformat("Size should be alligned to ZNS drive:"
+                  "drive size {} MB", actDevSize/(1024 * 1024)));
+
+  // Size should align to zone capacity
+  if (size % capSize)
+    throw std::invalid_argument(
+      folly::sformat("Size should be alligned to ZNS drive: capacity {} MB:"
+                            "Needed Size: {} MB", capSize/(1024 * 1024),
+                            (((size/ capSize) + 1) * capSize)/(1024 * 1024)));
+
+  // We can use the full device or part of the device
+  if (size < actDevSize)
+    numZones = size/capSize;
+
+  return std::make_unique<ZNSDevice>(std::move(fd),
+                                    size, ioAlignSize,
+                                    std::move(zoneSize),
+                                    std::move(capSize),
+                                    std::move(log),
+                                    std::move(rep),
+                                    std::move(encryptor),
+                                    maxDeviceWriteSize );
 }
 
 std::unique_ptr<Device> createDirectIoRAID0Device(

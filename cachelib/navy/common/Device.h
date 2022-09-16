@@ -148,10 +148,28 @@ class Device {
   // Returns the alignment size for device io operations
   uint32_t getIOAlignmentSize() const { return ioAlignmentSize_; }
 
+  //Valid opaerations than can be performed on a zone
+  enum ZoneOpEnum {
+    ZONE_DEVICE, //Check if the device is zoned
+    ZONE_RESET, //Reset a zone
+    ZONE_FINISH, //Finish a zone
+    ZONE_SIZE, //Zone size
+    ZONE_CAPACITY, //Zone Capacity
+    ZONE_ADDR_FROM_OFFSET //Get the zone address from offset
+  };
+
+  // Perform the above operations on the zone
+  uint64_t doZoneOp(ZoneOpEnum optype,
+    uint64_t arg1 = 0, uint64_t arg2 = 0) {
+    return doZoneOpImpl(optype, arg1, arg2);
+  }
+
  protected:
   virtual bool writeImpl(uint64_t offset, uint32_t size, const void* value) = 0;
   virtual bool readImpl(uint64_t offset, uint32_t size, void* value) = 0;
   virtual void flushImpl() = 0;
+  virtual uint64_t doZoneOpImpl(ZoneOpEnum optype,
+    uint64_t arg1 = 0, uint64_t arg2 = 0) = 0;
 
  private:
   mutable AtomicCounter bytesWritten_;
@@ -205,6 +223,15 @@ std::unique_ptr<Device> createMemoryDevice(
     uint64_t size,
     std::shared_ptr<DeviceEncryptor> encryptor,
     uint32_t ioAlignSize = 1);
+
+std::unique_ptr<Device> createDirectIoZNSDevice(
+    std::string fileName,
+    uint64_t size,
+    uint64_t regionSize,
+    uint32_t ioAlignSize,
+    std::shared_ptr<DeviceEncryptor> encryptor,
+    uint32_t maxDeviceWriteSize);
+
 } // namespace navy
 } // namespace cachelib
 } // namespace facebook

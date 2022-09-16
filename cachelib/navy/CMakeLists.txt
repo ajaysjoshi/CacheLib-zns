@@ -54,6 +54,11 @@ target_link_libraries(cachelib_navy PUBLIC
   cachelib_common
   )
 
+CHECK_INCLUDE_FILE("linux/blkzoned.h" HAVE_BLKZONED)
+IF(NOT HAVE_BLKZONED)
+  add_compile_definitions(NO_BLOCKZONED)
+ENDIF()
+
 install(TARGETS cachelib_navy
         EXPORT cachelib-exports
         DESTINATION ${LIB_INSTALL_DIR} )
